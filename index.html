@@ -838,8 +838,10 @@
     document.getElementById("f-placa").focus();
   }
 
+  var isSubmittingEntry = false;
   form.addEventListener("submit", function(e){
     e.preventDefault();
+    if(isSubmittingEntry) return; // bloquea dobles envíos (doble toque, doble clic, etc.)
     var fecha = document.getElementById("f-fecha").value;
     var horaIngreso = document.getElementById("f-hora-ingreso").value;
     var nombre = fNombre.value.trim();
@@ -858,10 +860,19 @@
       observaciones: observaciones, autorizadoAlIngreso: !!matchedId, primeraVez: !matchedId
     };
     var submitBtn = form.querySelector("button[type=submit]");
+    isSubmittingEntry = true;
     submitBtn.disabled = true;
-    sb.from(TBL_ENTRIES).insert(entryToDb(entry)).select().single().then(function(res){
+    // upsert con ignoreDuplicates: si por doble toque/clic llega la misma persona con la
+    // misma fecha+hora (a nivel de minuto) más de una vez, la base de datos la descarta
+    // en vez de crear un segundo registro (ver índice único en control_accesos_entries).
+    sb.from(TBL_ENTRIES).upsert(entryToDb(entry), {
+      onConflict: "identificacion,fecha,hora_ingreso", ignoreDuplicates: true
+    }).select().then(function(res){
       if(res.error) throw res.error;
-      upsertLocal(state.entries, entryFromDb(res.data));
+      var wasDuplicate = !res.data || res.data.length===0;
+      if(!wasDuplicate){
+        upsertLocal(state.entries, entryFromDb(res.data[0]));
+      }
       var authPromise = Promise.resolve();
       if(!matchedId && addCheckbox.checked){
         authPromise = sb.from(TBL_AUTH).insert(authToDb({
@@ -875,18 +886,18 @@
           authPromise = sb.from(TBL_AUTH).update({nombre:nombre, identificacion:identificacion}).eq("id", matchedId).then(function(r){ if(r.error) throw r.error; });
         }
       }
-      return authPromise;
-    }).then(function(){
+      return authPromise.then(function(){ return wasDuplicate; });
+    }).then(function(wasDuplicate){
       refreshEmpresaList();
       resetForm();
       renderInsideAndStats();
       renderAuthorized();
-      toast("Ingreso guardado.");
+      toast(wasDuplicate ? "Este ingreso ya estaba registrado (se evitó duplicarlo)." : "Ingreso guardado.");
       fNombre.focus();
     }).catch(function(err){
       console.error(err);
       toast("No se pudo guardar el ingreso. Revise la conexión e intente de nuevo.");
-    }).finally(function(){ submitBtn.disabled = false; });
+    }).finally(function(){ submitBtn.disabled = false; isSubmittingEntry = false; });
   });
   document.getElementById("btn-clear-form").addEventListener("click", resetForm);
 
